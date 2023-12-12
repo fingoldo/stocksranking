@@ -24,6 +24,7 @@ from os.path import exists, join
 import joblib
 from datetime import date, timedelta
 
+import os
 import urllib.request
 import concurrent.futures
 from urllib.request import HTTPError
@@ -111,6 +112,46 @@ feature_names = (
 # Scraping
 # ****************************************************************************************************************************
 
+import requests
+from time import sleep
+from random import random
+
+def download_to_file(url: str, filename: str, rewrite_existing: bool = True, timeout: int = 100, chunk_size: int = 1024, max_attempts: int = 5,headers:dict={},exit_codes:tuple=()):
+    """Dropin replacement for urllib.request.urlretrieve(url, filename) taht can hand for indefinitely long."""
+    # Make the actual request, set the timeout for no data to 10 seconds and enable streaming responses so we don't have to keep the large files in memory
+
+    nattempts = 0
+    while nattempts < max_attempts:    
+        try:
+            request = requests.get(url, timeout=timeout,headers=headers, stream=True)
+        except Exception as e:
+            if request is not None and request.status_code in exit_codes:
+                return
+            logger.exception(e)
+            sleep(10*random())
+            logger.info("Making another attempt")
+            nattempts += 1
+        else:
+            break            
+
+    nattempts = 0
+    while nattempts < max_attempts:
+        try:
+            # Open the output file and make sure we write in binary mode
+            with open(filename, "wb") as fh:
+                # Walk through the request response in chunks of chunk_size * 1024 bytes
+                for chunk in request.iter_content(chunk_size * 1024):
+                    # Write the chunk to the file
+                    fh.write(chunk)
+                    # Optionally we can check here if the download is taking too long
+        except Exception as e:
+            logger.exception(e)
+            sleep(10*random())
+            logger.info("Making another attempt")
+            nattempts += 1
+        else:
+            break
+
 def update_okx_hist_data(last_n_days:int=None)->int:
     n=0
     
@@ -126,12 +167,19 @@ def update_okx_hist_data(last_n_days:int=None)->int:
             if not exists(fpath):
                 url = f"https://www.okx.com/cdn/okex/traderecords/aggtrades/monthly/{dt.strftime('%Y%m')}/{fname}"
                 try:
-                    urllib.request.urlretrieve(
-                        url, fpath,
-                    )
+                    # urllib.request.urlretrieve(url, fpath)
+                    download_to_file(url=url, filename=fpath,timeout= 10, headers={"User-agent": "Mozilla/5.0"},exit_codes=(404))
+                    if exists(fpath):
+                        with open(fpath,'r',encoding='UTF-8') as f:
+                            contents=f.read()
+                        if "<Code>NoSuchKey</Code>" in contents:
+                            os.remove(fpath)
+                    
                 except HTTPError as e:
                     if e.code!=404:
                         logger.error(f"Error reading file {url}: {e}")
+                except Exception as e:
+                    logger.error(f"Error reading file {url}: {e}")
                 else:
                     logger.info(f"Downloaded raw data file {fname}.")
                     n+=1
