@@ -186,7 +186,12 @@ def update_okx_hist_data(last_n_days:int=None)->int:
     return n
 
 def read_okx_daily_trades(fname: str, clean: bool = False) -> pd.DataFrame:
-    df = pd.read_csv(join(DATAPATH, fname), encoding="GBK", header=None, low_memory=True)
+    fpath=join(DATAPATH, fname)
+    try:
+        df = pd.read_csv(fpath, encoding="GBK", header=None, low_memory=True)
+    except Exception as e:
+        os.remove(fpath)
+        return
     assert df.shape[1] == 6
     if "instrument_name" in df.iat[0, 0]:
         df = df.iloc[1:, :]
