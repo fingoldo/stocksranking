@@ -2,7 +2,7 @@ catboost
 pandas
 matplotlib
 scikit-learn
-dash
+dash[compress]
 dash_iconify
 dash_bootstrap_components
 dash_mantine_components
