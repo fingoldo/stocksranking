@@ -1,0 +1,13 @@
+catboost
+pandas
+matplotlib
+scikit-learn
+dash
+dash_iconify
+dash_bootstrap_components
+dash_mantine_components
+dash-ag-grid
+pytz
+numpy
+numba
+tqdm
