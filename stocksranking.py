@@ -1,4 +1,4 @@
-# ****************************************************************************************************************************
+    # ****************************************************************************************************************************
 # Imports
 # ****************************************************************************************************************************
 
@@ -27,7 +27,7 @@ from datetime import date, timedelta
 import urllib.request
 import concurrent.futures
 from urllib.request import HTTPError
-from pyutilz.pandaslib import optimize_dtypes
+# from pyutilz.pandaslib import optimize_dtypes
 
 #from mlframe.feature_engineering.timeseries import create_aggregated_features
 #from mlframe.feature_engineering.numerical import compute_numaggs, get_numaggs_names
@@ -55,8 +55,8 @@ pd.set_option("display.max_columns", 50)
 
 fastmath=True
 
-#DATAPATH = r"R:\Data\StocksRanking"
-DATAPATH = "data"
+DATAPATH = r"R:\Data\StocksRanking"
+#DATAPATH = "data"
 
 FIRST_HIST_DATE=date(2021, 10, 1)
 DROP_COLUMNS = ["ticker"]
@@ -152,7 +152,8 @@ def read_okx_daily_trades(fname: str, clean: bool = False) -> pd.DataFrame:
             logger.error(f"File {fname} contains errors in Side colum. Add it to exclusions list.")
             return
         else:
-            optimize_dtypes(df, ensure_float64_precision=False, verbose=False, inplace=True)
+            # optimize_dtypes(df, ensure_float64_precision=False, verbose=False, inplace=True)
+            pass
     return df
 
 # ****************************************************************************************************************************
