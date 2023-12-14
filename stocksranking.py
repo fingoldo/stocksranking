@@ -19,6 +19,7 @@ from typing import *
 
 import pandas as pd, numpy as np
 from tqdm import tqdm
+from tqdm import tqdm as tqdmu
 import matplotlib.pyplot as plt
 from os.path import exists, join
 import joblib
@@ -70,7 +71,175 @@ targets, estimators, thresholds, metrics = (
     ["AUC", "RMSE"],
 )
 
+# ****************************************************************************************************************************
+# Helpers
+# ****************************************************************************************************************************
 
+
+def optimize_dtypes(
+    df: pd.DataFrame,
+    max_categories: Optional[int] = 100,
+    reduce_size: bool = True,
+    float_to_int: bool = True,
+    skip_columns: Sequence = (),
+    use_uint: bool = True,  # might want to turn this off when using sqlalchemy (Unsigned 64 bit integer datatype is not supported)
+    verbose: bool = False,
+    inplace: bool = True,
+    skip_halffloat: bool = True,
+    ensure_float64_precision: bool = True,
+) -> pd.DataFrame:
+    """Compress datatypes in a pandas dataframe to save space while keeping precision.
+    Optionally attempts converting floats to ints where feasible.
+    Optionally converts object fields with nuniques less than max_categories to categorical.
+    """
+
+    # -----------------------------------------------------------------------------------------------------------------------------------------------------
+    # Inits
+    # -----------------------------------------------------------------------------------------------------------------------------------------------------
+
+    old_dtypes = {}
+    new_dtypes = {}
+    int_fields = []
+    float_fields = []
+    for field, the_type in df.dtypes.to_dict().items():
+        if field not in skip_columns:
+            old_dtypes[field] = the_type.name
+            if "int" in the_type.name:
+                int_fields.append(field)
+            elif "float" in the_type.name:
+                float_fields.append(field)
+
+    # -----------------------------------------------------------------------------------------------------------------------------------------------------
+    # Every object var with too few categories must become a Category
+    # -----------------------------------------------------------------------------------------------------------------------------------------------------
+
+    if max_categories is not None:
+        for col, the_type in old_dtypes.items():
+            if "object" in the_type:                
+                if field in skip_columns:
+                    continue
+
+                # first try to int64, then to float64, then to category
+                new_dtype = None
+                try:
+                    df[col] = df[col].astype(np.int64)
+                    old_dtypes[col] = "int64"
+                    int_fields.append(col)
+                except Exception as e1:
+                    try:
+                        df[col] = df[col].astype(np.float64)
+                        old_dtypes[col] = "float64"
+                        float_fields.append(col)
+                    except Exception as e2:
+                        try:
+                            n = df[col].nunique()
+                            if n <= max_categories:
+                                if verbose:
+                                    logger.info("%s %s->category", col, the_type)
+                                
+                                new_dtypes[col] = "category"
+                                if inplace:
+                                    df[col] = df[col].astype(new_dtypes[col])
+                                    
+                        except Exception as e3:
+                            if verbose:
+                                logger.warning(f"Could not convert to category column {col}: {str(e3)}")
+                            pass  # to avoid stumbling on lists like [1]
+    # -----------------------------------------------------------------------------------------------------------------------------------------------------
+    # Finds minimal size suitable to hold each variable of interest without loss of coverage
+    # -----------------------------------------------------------------------------------------------------------------------------------------------------
+
+    if reduce_size:
+        mantissas = {}
+        uint_fields = []
+        if use_uint:
+            conversions = [
+                (int_fields, "uint"),
+                (int_fields, "int"),
+            ]
+        else:
+            conversions = [
+                (int_fields, "int"),
+            ]
+        if float_to_int:
+
+            # -----------------------------------------------------------------------------------------------------------------------------------------------------
+            # Checks for each float if it has no fractional digits and NaNs, and, therefore, can be made an int
+            # ----------------------------------------------------------------------------------------------------------------------------------------------------
+
+            possibly_integer = []
+            for col in tqdmu(float_fields, desc="checking float2int", leave=False):
+                if not (df[col].isna().any()):  # NAs can't be converted to int
+                    fract_part, _ = np.modf(df[col])
+                    if (fract_part == 0.0).all():
+                        possibly_integer.append(col)
+            if possibly_integer:
+                if use_uint:
+                    conversions.append((possibly_integer, "uint"))
+                conversions.append((possibly_integer, "int"))
+        conversions.append((float_fields, "float"))
+        for fields, type_name in tqdmu(conversions, desc="size reduction", leave=False):
+            fields = [el for el in fields if el not in uint_fields]
+            if len(fields) > 0:
+                max_vals = df[fields].max()
+                min_vals = df[fields].min()
+
+                if type_name in ("int", "uint"):
+                    powers = [8, 16, 32, 64]
+                    topvals = [np.iinfo(type_name + str(p)) for p in powers]
+                elif type_name == "float":
+                    powers = [32, 64] if skip_halffloat else [16, 32, 64]  # no float8
+                    topvals = [np.finfo(type_name + str(p)) for p in powers]
+
+                min_max = pd.concat([min_vals, max_vals], axis=1)
+                min_max.columns = ["min", "max"]
+
+                for r in min_max.itertuples():
+                    col = r.Index
+                    cur_power = int(old_dtypes[col].replace("uint", "").replace("int", "").replace("float", ""))
+                    for j, p in enumerate(powers):
+                        if p >= cur_power:
+                            if not (col in float_fields and type_name != "float"):
+                                break
+                        if r.max <= topvals[j].max and r.min >= topvals[j].min:
+                            if ensure_float64_precision and type_name == "float":
+                                # need to ensure we are not losing precision! np.array([2.205001270000e09]).astype(np.float64) must not pass here, for example.
+                                if col not in mantissas:
+                                    values = df[col].values
+                                    with np.errstate(divide="ignore"):
+                                        _, int_part = np.modf(np.log10(np.abs(values)))
+                                        mantissa = np.round(values / 10**int_part, np.finfo(old_dtypes[col]).precision - 1)
+
+                                    mantissas[col] = mantissa
+                                else:
+                                    mantissa = mantissas[col]
+
+                                fract_part, _ = np.modf(mantissa * 10 ** (np.finfo("float" + str(p)).precision + 1))
+                                fract_part, _ = np.modf(np.round(fract_part, np.finfo("float" + str(p)).precision - 1))
+                                if (np.ma.array(fract_part, mask=np.isnan(fract_part)) != 0).any():  # masking so that NaNs do not count
+                                    if verbose:
+                                        logger.info("Column %s can't be converted to float%s due to precision loss.", col, p)
+                                    break
+                            if type_name in ("uint", "int"):
+                                uint_fields.append(col)  # successfully converted, so won't need to consider anymore
+                            if verbose:
+                                logger.info("%s [%s]->[%s%s]", col, old_dtypes[col], type_name, p)
+                            new_dtypes[col] = type_name + str(p)
+                            if inplace:
+                                df[col] = df[col].astype(new_dtypes[col])
+                            break
+
+    # -----------------------------------------------------------------------------------------------------------------------------------------------------
+    # Actual converting & reporting.
+    # -----------------------------------------------------------------------------------------------------------------------------------------------------
+
+    if len(new_dtypes) > 0 and not inplace:
+        if verbose:
+            logger.info(f"Going to use the following new dtypes: {new_dtypes}")
+        return df.astype(new_dtypes)
+    else:
+        return df
+    
 # ****************************************************************************************************************************
 # Features
 # ****************************************************************************************************************************
@@ -152,7 +321,7 @@ def download_to_file(url: str, filename: str, rewrite_existing: bool = True, tim
         else:
             break
 
-def update_okx_hist_data(last_n_days:int=None)->int:
+def update_okx_hist_data(last_n_days:int=None,agg:bool=True)->int:
     n=0
     
     if last_n_days:
@@ -162,18 +331,30 @@ def update_okx_hist_data(last_n_days:int=None)->int:
     
     for dt in tqdm(pd.date_range(first_date,date.today() + timedelta(days=2))):
         for asset_class in "spot future swap".split():
-            fname = f"all{asset_class}-aggtrades-{dt.strftime('%Y-%m-%d.zip')}"
-            fpath = join(DATAPATH, fname)
+            
+            fname = f"all{asset_class}-{'agg' if agg else ''}trades-{dt.strftime('%Y-%m-%d.zip')}"
+
+            if agg:
+                fpath = join(DATAPATH, fname)
+            else:
+                fpath = join(DATAPATH,'noagg', fname)
+
             if not exists(fpath):
-                url = f"https://www.okx.com/cdn/okex/traderecords/aggtrades/monthly/{dt.strftime('%Y%m')}/{fname}"
+                url = f"https://www.okx.com/cdn/okex/traderecords/{'agg' if agg else ''}trades/monthly/{dt.strftime('%Y%m')}/{fname}"
                 try:
-                    # urllib.request.urlretrieve(url, fpath)
-                    download_to_file(url=url, filename=fpath,timeout= 10, headers={"User-agent": "Mozilla/5.0"},exit_codes=(404))
-                    if exists(fpath):
-                        with open(fpath,'r',encoding='UTF-8') as f:
-                            contents=f.read()
-                        if "<Code>NoSuchKey</Code>" in contents:
-                            os.remove(fpath)
+                    print(f"trying {fname}")
+                    if True:
+                        urllib.request.urlretrieve(url, fpath)                    
+                    else:
+                        download_to_file(url=url, filename=fpath,timeout= 10, headers={"User-agent": "Mozilla/5.0"},exit_codes=(404))
+                        if exists(fpath):
+                            with open(fpath,'r',encoding='UTF-8') as f:
+                                contents=f.read()
+                            if "<Code>NoSuchKey</Code>" in contents:
+                                os.remove(fpath)
+                                print(f"removed {fname}")
+                            else:
+                                print(f"added {fname}")
                     
                 except HTTPError as e:
                     if e.code!=404:
@@ -205,7 +386,7 @@ def read_okx_daily_trades(fname: str, clean: bool = False) -> pd.DataFrame:
             logger.error(f"File {fname} contains errors in Side colum. Add it to exclusions list.")
             return
         else:
-            # optimize_dtypes(df, ensure_float64_precision=False, verbose=False, inplace=True)
+            optimize_dtypes(df, ensure_float64_precision=False, verbose=False, inplace=True)
             pass
     return df
 
