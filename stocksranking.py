@@ -506,7 +506,7 @@ def featurize_raw_file(fname: str):
         df["unified_volume"] = df["ticker"].map(vol_conversion_rates) * df["volume"]
         df=df[~df.unified_volume.isna()]
         interval_features = create_interval_features(df)
-        # optimize_dtypes(interval_features, ensure_float64_precision=False, verbose=False, inplace=True)
+        optimize_dtypes(interval_features, ensure_float64_precision=False, verbose=False, inplace=True)
         interval_features.to_parquet(join(DATAPATH,'features',fname.replace('.zip','.parquet')))
         logger.info(f"Created features file {fname}.")
 
